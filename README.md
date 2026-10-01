@@ -6,6 +6,9 @@ Click the puzzle piece for a panel listing your installed plugins. Flip as many
 switches as you like; nothing changes until you press **APPLY**, and
 **REVERT** throws the staged changes away.
 
+With nothing staged, that button becomes **UNDO**: it reverses the last
+apply, even after the panel was closed.
+
 ## Re-enabled widgets come back where they were
 
 Disabling a bar widget normally deletes its entry from `shell.json`, position

@@ -26,16 +26,19 @@ Panel {
   property bool applying: false
   property var lastApply: null
   property bool reloadQueued: false
-  // The footer names the last apply's changes for 30 seconds after it ran.
-  property bool showLastApply: false
-  onLastApplyChanged: {
-    var age = lastApply ? Date.now() - lastApply.at : Infinity
-    showLastApply = age < 30 * 1000
-    if (showLastApply) {
-      lastApplyExpiry.interval = Math.max(1, 30 * 1000 - age)
-      lastApplyExpiry.restart()
+  property int applyingCount: 0
+  // The opposite of what the last apply actually changed; UNDO applies it.
+  // An undo cannot itself be undone; the switches do that job.
+  readonly property var undoChanges: {
+    var changes = {}
+    if (!lastApply || !lastApply.done || lastApply.undo) return changes
+    for (var i = 0; i < lastApply.done.length; ++i) {
+      var id = lastApply.done[i]
+      if (lastApply.changes[id] !== undefined) changes[id] = !lastApply.changes[id]
     }
+    return changes
   }
+  readonly property bool canUndo: Object.keys(undoChanges).length > 0
 
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
     + "/omarchy-plugin-manager"
@@ -103,21 +106,32 @@ Panel {
     return memory ? "off · remembers " + placeText(memory) : "off"
   }
 
-  function applyChanges() {
-    if (!pendingCount || applying) return
+  function run(changes, undo) {
+    var count = Object.keys(changes).length
+    if (!count || applying) return
     applying = true
-    Quickshell.execDetached(["python3", helper, "apply", JSON.stringify(pending), "--reopen"])
+    applyingCount = count
+    var args = ["python3", helper, "apply", JSON.stringify(changes), "--reopen"]
+    if (undo) args.push("--undo")
+    Quickshell.execDetached(args)
   }
 
+  function applyChanges() { run(pending, false) }
+  function undoLastApply() { run(undoChanges, true) }
+
+  function plural(count) { return count + " change" + (count === 1 ? "" : "s") }
+
+  // While nothing is staged the footer describes the last apply, which is
+  // what UNDO acts on.
   function resultText() {
-    if (applying) return "Applying " + pendingCount + " change" + (pendingCount === 1 ? "" : "s") + "…"
-    if (pendingCount) return pendingCount + " change" + (pendingCount === 1 ? "" : "s") + " pending"
-    // Name what the last apply did, briefly; afterwards describe the list.
-    if (showLastApply) {
+    if (applying) return "Applying " + plural(applyingCount) + "…"
+    if (pendingCount) return plural(pendingCount) + " pending"
+    if (lastApply) {
       if (lastApply.errors.length) return "Failed: " + lastApply.errors.join("; ")
       var parts = []
-      for (var id in lastApply.changes) parts.push(nameOf(id) + (lastApply.changes[id] ? " on" : " off"))
-      return "Applied: " + parts.join(", ")
+      var state = lastApply.undo ? [" back on", " back off"] : [" on", " off"]
+      for (var id in lastApply.changes) parts.push(nameOf(id) + (lastApply.changes[id] ? state[0] : state[1]))
+      if (parts.length) return (lastApply.undo ? "Undone · " : "Last: ") + parts.join(", ")
     }
     return visibleEnabledCount + " of " + visiblePlugins.length + " on"
   }
@@ -137,11 +151,6 @@ Panel {
     } else if (!applying) {
       pending = ({})
     }
-  }
-
-  Timer {
-    id: lastApplyExpiry
-    onTriggered: root.showLastApply = false
   }
 
   Process {
@@ -403,11 +412,16 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: 12
         }
+        // Discards staged switches; with nothing staged it undoes the last
+        // apply instead.
         Chip {
           id: revertChip
-          label: "REVERT"
-          active: root.pendingCount > 0 && !root.applying
-          onClicked: root.pending = ({})
+          label: root.pendingCount || !root.canUndo ? "REVERT" : "UNDO"
+          active: !root.applying && (root.pendingCount > 0 || root.canUndo)
+          onClicked: {
+            if (root.pendingCount) root.pending = ({})
+            else root.undoLastApply()
+          }
         }
         Chip {
           id: applyChip

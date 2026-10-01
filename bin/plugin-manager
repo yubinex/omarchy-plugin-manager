@@ -7,6 +7,8 @@
                                   and records it in last-apply.json
     plugin-manager apply '<json>' --reopen
                                   as above, then reopens the panel
+    plugin-manager apply '<json>' --undo
+                                  marks the result as undoing the previous apply
 
 Any change to the bar layout rebuilds every widget, the panel that asked for
 the change included, so the panel starts `apply --reopen` detached and reads
@@ -175,7 +177,7 @@ def placement_args(memory):
     return args + ["--index", str(min(int(memory.get("index", len(ids))), len(ids)))]
 
 
-def apply(changes, reopen=False):
+def apply(changes, reopen=False, undo=False):
     snapshot()
     with State() as state:
         remembered = dict(state.data)
@@ -207,7 +209,7 @@ def apply(changes, reopen=False):
                 errors.append(f"{wid} setting {key}: {message}")
 
     snapshot()
-    result = {"at": int(time.time() * 1000), "changes": changes, "done": done, "errors": errors}
+    result = {"at": int(time.time() * 1000), "changes": changes, "done": done, "errors": errors, "undo": undo}
     os.makedirs(STATE_DIR, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=STATE_DIR)
     with os.fdopen(fd, "w") as f:
@@ -228,7 +230,8 @@ def main():
         changes = json.loads(sys.argv[2])
         if not isinstance(changes, dict):
             raise SystemExit("apply expects a JSON object of id -> bool")
-        apply({str(k): bool(v) for k, v in changes.items()}, reopen="--reopen" in sys.argv[3:])
+        flags = sys.argv[3:]
+        apply({str(k): bool(v) for k, v in changes.items()}, reopen="--reopen" in flags, undo="--undo" in flags)
     else:
         raise SystemExit(__doc__)
 
