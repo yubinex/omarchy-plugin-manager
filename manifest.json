@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "yubinex.plugin-manager",
+  "name": "Plugin Manager",
+  "version": "1.0.0",
+  "author": "yubinex",
+  "description": "Toggle many Omarchy shell plugins at once from one panel; re-enabled bar widgets return to where they were, with their settings.",
+  "license": "MIT",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Plugin Manager",
+    "description": "Panel listing installed plugins with switches; stage changes and apply them together.",
+    "category": "System",
+    "aliases": ["plugins", "manager", "extensions"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Backend for the Plugin Manager panel.
+
+    plugin-manager snapshot       remember where every bar widget sits now
+    plugin-manager list           plugins + current and remembered placement, as JSON
+    plugin-manager apply '<json>' {"<id>": true|false, ...}; prints a JSON result
+                                  and records it in last-apply.json
+    plugin-manager apply '<json>' --reopen
+                                  as above, then reopens the panel
+
+Any change to the bar layout rebuilds every widget, the panel that asked for
+the change included, so the panel starts `apply --reopen` detached and reads
+the outcome from last-apply.json when it comes back.
+
+Disabling a bar widget removes its entry from shell.json, settings and all,
+and re-enabling inserts a bare entry at the default spot. `snapshot` records
+each widget's section, neighbours and inline settings whenever the layout
+changes, so `apply` can put a re-enabled widget back where it was, as it was.
+"""
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+
+SELF_ID = "yubinex.plugin-manager"
+CONFIG = os.path.expanduser("~/.config/omarchy/shell.json")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                         "omarchy-plugin-manager")
+STATE = os.path.join(STATE_DIR, "positions.json")
+LAST_APPLY = os.path.join(STATE_DIR, "last-apply.json")
+SECTIONS = ("left", "center", "right")
+
+
+def entry_id(entry):
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return str(entry.get("id", ""))
+    return ""
+
+
+def read_config():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def layout(config):
+    sections = ((config.get("bar") or {}).get("layout") or {})
+    return {s: list(sections.get(s) or []) for s in SECTIONS}
+
+
+def placements(config):
+    """Where each bar widget sits right now, keyed by id."""
+    found = {}
+    for section, entries in layout(config).items():
+        ids = [entry_id(e) for e in entries]
+        for index, entry in enumerate(entries):
+            wid = ids[index]
+            if not wid:
+                continue
+            found[wid] = {
+                "section": section,
+                "index": index,
+                "after": ids[index - 1] if index > 0 else "",
+                "before": ids[index + 1] if index + 1 < len(ids) else "",
+                "entry": entry if isinstance(entry, dict) else {"id": wid},
+            }
+    return found
+
+
+class State:
+    """positions.json under an exclusive lock; the panel and apply can overlap."""
+
+    def __enter__(self):
+        os.makedirs(STATE_DIR, exist_ok=True)
+        self.lock = open(STATE + ".lock", "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            with open(STATE) as f:
+                self.data = json.load(f)
+        except (OSError, ValueError):
+            self.data = {}
+        return self
+
+    def save(self):
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR)
+        with os.fdopen(fd, "w") as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, STATE)
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.lock.close()
+
+
+def snapshot():
+    # Widgets missing from the layout keep their last remembered placement.
+    current = placements(read_config())
+    with State() as state:
+        changed = False
+        for wid, place in current.items():
+            if state.data.get(wid) != place:
+                state.data[wid] = place
+                changed = True
+        if changed:
+            state.save()
+
+
+def run(args):
+    # Every change reloads the shell's plugins, and its IPC answers "not
+    # responding" for a moment while it does; wait that out.
+    for attempt in range(5):
+        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        output = (result.stderr or result.stdout).strip()
+        if result.returncode == 0 or "not responding" not in output:
+            break
+        time.sleep(1 + attempt)
+    return result.returncode == 0, output if result.returncode else result.stdout
+
+
+def installed():
+    ok, output = run(["omarchy", "plugin", "list", "--json"])
+    if not ok:
+        raise SystemExit(json.dumps({"error": output or "omarchy plugin list failed"}))
+    return json.loads(output)
+
+
+def list_plugins():
+    snapshot()
+    current = placements(read_config())
+    with State() as state:
+        remembered = dict(state.data)
+    out = []
+    for plugin in installed():
+        kinds = plugin.get("kinds") or []
+        # A bar option replaces the whole bar rather than toggling; leave
+        # those, the undisableable ones, and this manager itself alone.
+        if "bar" in kinds or not plugin.get("canDisable", True) or plugin["id"] == SELF_ID:
+            continue
+        wid = plugin["id"]
+        place = current.get(wid)
+        memory = remembered.get(wid)
+        out.append({
+            "id": wid,
+            "name": plugin.get("name") or wid,
+            "kinds": kinds,
+            "enabled": bool(plugin.get("enabled")),
+            "firstParty": bool(plugin.get("firstParty")),
+            "barWidget": "bar-widget" in kinds,
+            "section": place["section"] if place else "",
+            "remembered": {k: memory[k] for k in ("section", "index", "after", "before")} if memory else None,
+            "rememberedSettings": sorted(k for k in (memory or {}).get("entry", {}) if k != "id"),
+        })
+    out.sort(key=lambda p: (p["firstParty"], p["name"].lower()))
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def placement_args(memory):
+    """Translate a remembered placement into `omarchy plugin enable` flags
+    against the layout as it is now: beside the same neighbour if it is still
+    in that section, else at the same index."""
+    section = memory["section"]
+    ids = [entry_id(e) for e in layout(read_config())[section]]
+    args = ["--section", section]
+    if memory.get("after") in ids:
+        return args + ["--after", memory["after"]]
+    if memory.get("before") in ids:
+        return args + ["--before", memory["before"]]
+    return args + ["--index", str(min(int(memory.get("index", len(ids))), len(ids)))]
+
+
+def apply(changes, reopen=False):
+    snapshot()
+    with State() as state:
+        remembered = dict(state.data)
+    done, errors = [], []
+
+    for wid in [w for w, on in changes.items() if not on]:
+        ok, message = run(["omarchy", "plugin", "disable", wid])
+        (done if ok else errors).append(wid if ok else f"{wid}: {message}")
+
+    # Re-enable in their old order so neighbours that come back together can
+    # find each other.
+    enabling = [w for w, on in changes.items() if on]
+    enabling.sort(key=lambda w: (remembered.get(w, {}).get("section", "~"), remembered.get(w, {}).get("index", 0)))
+    for wid in enabling:
+        memory = remembered.get(wid)
+        args = ["omarchy", "plugin", "enable", wid]
+        if memory and memory.get("section") in SECTIONS:
+            args += placement_args(memory)
+        ok, message = run(args)
+        if not ok:
+            errors.append(f"{wid}: {message}")
+            continue
+        done.append(wid)
+        for key, value in (memory or {}).get("entry", {}).items():
+            if key == "id":
+                continue
+            ok, message = run(["omarchy", "bar", "set", wid, key, json.dumps(value), "--json"])
+            if not ok:
+                errors.append(f"{wid} setting {key}: {message}")
+
+    snapshot()
+    result = {"at": int(time.time() * 1000), "changes": changes, "done": done, "errors": errors}
+    os.makedirs(STATE_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=STATE_DIR)
+    with os.fdopen(fd, "w") as f:
+        json.dump(result, f, ensure_ascii=False)
+    os.replace(tmp, LAST_APPLY)
+    if reopen:
+        run(["omarchy-shell", "-q", "shell", "summon", SELF_ID, ""])
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def main():
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    if command == "snapshot":
+        snapshot()
+    elif command == "list":
+        list_plugins()
+    elif command == "apply" and len(sys.argv) > 2:
+        changes = json.loads(sys.argv[2])
+        if not isinstance(changes, dict):
+            raise SystemExit("apply expects a JSON object of id -> bool")
+        apply({str(k): bool(v) for k, v in changes.items()}, reopen="--reopen" in sys.argv[3:])
+    else:
+        raise SystemExit(__doc__)
+
+
+main()

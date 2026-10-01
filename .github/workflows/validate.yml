@@ -1,0 +1,44 @@
+name: Validate plugin
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install QML formatter and JSON validator
+        run: sudo apt-get update && sudo apt-get install --yes jq qt6-declarative-dev-tools
+
+      - name: Validate plugin manifest JSON
+        run: |
+          jq empty manifest.json
+          jq --exit-status '
+            .schemaVersion == 1
+            and (.id | type == "string" and length > 0)
+            and (.name | type == "string" and length > 0)
+            and (.version | type == "string" and length > 0)
+            and (.kinds | index("bar-widget"))
+            and (.entryPoints.barWidget | type == "string" and endswith(".qml"))
+          ' manifest.json >/dev/null
+
+      - name: Validate QML syntax
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(*.qml)
+          test "${#files[@]}" -gt 0
+          qmlformat="/usr/lib/qt6/bin/qmlformat"
+          test -x "${qmlformat}"
+          for file in "${files[@]}"; do
+            "${qmlformat}" "${file}" >/dev/null
+          done
