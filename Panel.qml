@@ -53,8 +53,14 @@ Panel {
   readonly property var visiblePlugins: plugins.filter(function(p) {
     return !p.firstParty || (showBuiltIn && p.barWidget)
   })
-  readonly property var barWidgets: visiblePlugins.filter(function(p) { return p.barWidget })
+  // Built-ins get their own section and a badge, so switching one is never
+  // mistaken for switching a plugin you installed.
+  readonly property var barWidgets: visiblePlugins.filter(function(p) { return p.barWidget && !p.firstParty })
   readonly property var otherPlugins: visiblePlugins.filter(function(p) { return !p.barWidget })
+  readonly property var builtInWidgets: visiblePlugins.filter(function(p) { return p.firstParty })
+  readonly property int pendingBuiltInCount: plugins.filter(function(p) {
+    return p.firstParty && pending[p.id] !== undefined
+  }).length
   readonly property int visibleEnabledCount: visiblePlugins.filter(function(p) { return p.enabled }).length
 
   // Changes can land while a listing is in flight; never drop the newer one.
@@ -128,6 +134,7 @@ Panel {
   function resultText() {
     if (applying) return "Applying " + plural(applyingCount) + "…"
     if (pendingCount) return plural(pendingCount) + " pending"
+      + (pendingBuiltInCount ? " · " + pendingBuiltInCount + " built-in" : "")
     if (lastApply) {
       if (lastApply.errors.length) return "Failed: " + lastApply.errors.join("; ")
       var parts = []
@@ -244,14 +251,39 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(2)
 
-      Text {
+      Row {
         width: parent.width
-        text: (row.changed ? "● " : "") + row.modelData.name
-        elide: Text.ElideRight
-        color: row.on ? root.fg : root.dim
-        font.family: root.fontFamily
-        font.pixelSize: 14
-        font.bold: true
+        spacing: Style.space(6)
+        Text {
+          width: Math.min(implicitWidth, parent.width - (builtInBadge.visible ? builtInBadge.width + parent.spacing : 0))
+          anchors.verticalCenter: parent.verticalCenter
+          text: (row.changed ? "● " : "") + row.modelData.name
+          elide: Text.ElideRight
+          color: row.on ? root.fg : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: 14
+          font.bold: true
+        }
+        Rectangle {
+          id: builtInBadge
+          visible: row.modelData.firstParty
+          anchors.verticalCenter: parent.verticalCenter
+          width: badgeLabel.implicitWidth + Style.space(8)
+          height: badgeLabel.implicitHeight + Style.space(2)
+          radius: Style.space(2)
+          color: "transparent"
+          border.width: 1
+          border.color: Color.accent
+          Text {
+            id: badgeLabel
+            anchors.centerIn: parent
+            text: "BUILT-IN"
+            color: Color.accent
+            font.family: root.fontFamily
+            font.pixelSize: 9
+            font.bold: true
+          }
+        }
       }
       Text {
         width: parent.width
@@ -396,6 +428,27 @@ Panel {
           width: parent.width
           Repeater {
             model: root.otherPlugins
+            delegate: PluginRow {}
+          }
+        }
+
+        SectionLabel {
+          visible: root.builtInWidgets.length > 0
+          text: "BUILT-IN BAR WIDGETS"
+        }
+        Text {
+          width: parent.width
+          visible: root.builtInWidgets.length > 0
+          text: "Part of Omarchy. Switching one off only removes it from the bar; the panel brings it back with its settings."
+          wrapMode: Text.WordWrap
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: 11
+        }
+        Column {
+          width: parent.width
+          Repeater {
+            model: root.builtInWidgets
             delegate: PluginRow {}
           }
         }
