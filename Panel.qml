@@ -46,6 +46,8 @@ Panel {
   readonly property color dim: Qt.darker(fg, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property int pendingCount: Object.keys(pending).length
+  // Below this the footer status gets its own line above the buttons.
+  readonly property bool narrowLayout: popup.contentWidth < Style.space(380)
   // Built-in services (lock screen, polkit, notifications…) are left out on
   // purpose: a casual switch panel should not make those easy to turn off.
   readonly property var visiblePlugins: plugins.filter(function(p) {
@@ -277,6 +279,14 @@ Panel {
     }
   }
 
+  component StatusText: Text {
+    text: root.resultText()
+    color: root.lastApply && root.lastApply.errors.length && !root.pendingCount && !root.applying
+      ? Color.urgent : root.dim
+    font.family: root.fontFamily
+    font.pixelSize: 12
+  }
+
   component SectionLabel: Text {
     color: root.dim
     font.family: root.fontFamily
@@ -310,6 +320,8 @@ Panel {
       anchors.top: parent.top
       anchors.bottom: footer.top
       anchors.bottomMargin: Style.space(10)
+      // Leave a gutter for the scroll indicator when the list overflows.
+      anchors.rightMargin: interactive ? Style.space(10) : 0
       contentWidth: width
       contentHeight: content.implicitHeight
       clip: true
@@ -390,6 +402,16 @@ Panel {
       }
     }
 
+    Rectangle {
+      visible: scroll.interactive
+      anchors.right: parent.right
+      width: Style.space(3)
+      radius: width / 2
+      y: scroll.y + scroll.height * scroll.visibleArea.yPosition
+      height: scroll.height * scroll.visibleArea.heightRatio
+      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
+    }
+
     Column {
       id: footer
       anchors.left: parent.left
@@ -399,18 +421,20 @@ Panel {
 
       PanelSeparator { width: parent.width }
 
-      Row {
+      StatusText {
+        visible: root.narrowLayout
         width: parent.width
+        wrapMode: Text.WordWrap
+      }
+
+      Row {
+        anchors.right: parent.right
         spacing: Style.space(8)
-        Text {
-          width: parent.width - revertChip.width - applyChip.width - parent.spacing * 2
+        StatusText {
+          visible: !root.narrowLayout
+          width: visible ? footer.width - revertChip.width - applyChip.width - parent.spacing * 2 : 0
           anchors.verticalCenter: parent.verticalCenter
-          text: root.resultText()
           elide: Text.ElideRight
-          color: root.lastApply && root.lastApply.errors.length && !root.pendingCount && !root.applying
-            ? Color.urgent : root.dim
-          font.family: root.fontFamily
-          font.pixelSize: 12
         }
         // Discards staged switches; with nothing staged it undoes the last
         // apply instead.
